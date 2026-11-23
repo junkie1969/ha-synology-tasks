@@ -99,6 +99,48 @@ class SynologyDSM:
         tasks: list[SynologyTask] = tasks_data.get(DATA_TASKS_KEY, [])
         return [Task.from_api(task) for task in tasks]
 
+    async def get_latest_run(self, task_id: int) -> dict | None:
+        """Return the latest DSM run, or None if there is no history."""
+        params = {
+            "api": API_TASK_SCHEDULER,
+            "method": "view",
+            "version": "1",
+            "id": int(task_id),
+        }
+
+        response = await self.hass.async_add_executor_job(
+            self._sync_request, params
+        )
+
+        history = response.get(DATA_KEY)
+
+        if not isinstance(history, list):
+            raise SynologyDSMAPIError(
+                f"Unexpected run-history response for task ID {task_id}"
+            )
+
+        if not history:
+            return None
+
+        for run in history:
+            if (
+                not isinstance(run, dict)
+                or not isinstance(run.get("start_time"), str)
+                or not run["start_time"]
+            ):
+                raise SynologyDSMAPIError(
+                    f"Invalid run-history entry for task ID {task_id}"
+                )
+
+        latest = max(history, key=lambda run: run["start_time"])
+
+        return {
+            "start_time": latest["start_time"],
+            "stop_time": latest.get("stop_time") or None,
+            "exit_type": latest.get("exit_type"),
+            "exit_code": latest.get("exit_code"),
+        }
+    
     async def run_task(self, task_name: str | int) -> None:
         """Run a task by ID, retaining support for callers using its name."""
         # Buttons pass the numeric ID. Existing service callers may
@@ -152,7 +194,23 @@ class SynologyDSM:
             task_id,
             response,
         )
-        
+        # Temporary diagnostic: remove when monitoring is implemented.
+        if task_id in {25, 26}:
+            try:
+                latest = await self.get_latest_run(task_id)
+                _LOGGER.debug(
+                    "DSM latest run for task ID %s: %s",
+                    task_id,
+                    latest,
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Task run was requested, but reading history failed "
+                    "for task ID %s",
+                    task_id,
+                    exc_info=True,
+                )
+    
     def _sync_login(self) -> None:
         """Login to the DSM."""
         if self._session is None:
