@@ -105,7 +105,6 @@ class SynologyTaskButton(CoordinatorEntity[SynologyTasksCoordinator], ButtonEnti
         if not (task := self._get_task()):
             return
         await self.coordinator.api.run_task(task.id)
-        await self.coordinator.async_request_refresh()
 
     @property
     def extra_state_attributes(self) -> dict[str, str | int | bool | datetime | None]:
