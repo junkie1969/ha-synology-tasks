@@ -194,6 +194,34 @@ class SynologyDSM:
             task_id,
             response,
         )
+        data = response.get(DATA_KEY)
+
+        if not isinstance(data, dict):
+            raise SynologyTaskRunError(
+                f"Unexpected launch response for task ID {task_id}"
+            )
+
+        results = data.get("result")
+        run_results = (
+            [
+                result
+                for result in results
+                if isinstance(result, dict)
+                and result.get("api") == API_TASK_SCHEDULER
+                and result.get("method") == "run"
+            ]
+            if isinstance(results, list)
+            else []
+        )
+
+        if (
+            data.get("has_fail") is not False
+            or len(run_results) != 1
+            or run_results[0].get("success") is not True
+        ):
+            raise SynologyTaskRunError(
+                f"DSM did not confirm launch acceptance for task ID {task_id}"
+            )
     
     def _sync_login(self) -> None:
         """Login to the DSM."""
