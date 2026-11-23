@@ -65,6 +65,15 @@ TASK_SENSORS = [
 ]
 
 
+EXECUTION_STATUS_KEY = "execution_status"
+
+EXECUTION_SENSOR = SynologyTaskSensorEntityDescription(
+    key=EXECUTION_STATUS_KEY,
+    name="Execution status",
+    icon="mdi:progress-clock",
+)
+
+
 class SynologyTaskSensor(CoordinatorEntity[SynologyTasksCoordinator], SensorEntity):
     """Representation of a Synology task sensor."""
 
@@ -104,8 +113,11 @@ class SynologyTaskSensor(CoordinatorEntity[SynologyTasksCoordinator], SensorEnti
                 sw_version=config_entry.data.get(CONFIG_DEVICE_SW_VERSION),
             )
 
-        # Set a clean display name - just the task name
-        self._attr_name = task.name
+        if entity_description.key == EXECUTION_STATUS_KEY:
+            self._attr_name = f"{task.name} Execution status"
+        else:
+            self._attr_name = task.name
+
         self._attr_has_entity_name = False
 
     @property
@@ -113,6 +125,12 @@ class SynologyTaskSensor(CoordinatorEntity[SynologyTasksCoordinator], SensorEnti
         """Return the state of the sensor."""
         if not (task := self._get_task()):
             return None
+        if self.entity_description.key == EXECUTION_STATUS_KEY:
+            state = self.coordinator.run_states.get(task.id)
+            if state is None:
+                return None
+            return state.status
+
         return self.entity_description.value_fn(task)
 
     @property
@@ -121,7 +139,7 @@ class SynologyTaskSensor(CoordinatorEntity[SynologyTasksCoordinator], SensorEnti
         if not (task := self._get_task()):
             return {}
 
-        return {
+        attributes: dict[str, str | int | bool | datetime | None] = {
             ATTR_TASK_ID: task.id,
             ATTR_TASK_NAME: task.name,
             ATTR_TASK_TYPE: task.type,
@@ -130,6 +148,26 @@ class SynologyTaskSensor(CoordinatorEntity[SynologyTasksCoordinator], SensorEnti
             ATTR_NEXT_RUN_TIME: task.next_run_time,
             ATTR_CAN_RUN: task.can_run,
         }
+
+        if self.entity_description.key == EXECUTION_STATUS_KEY:
+            state = self.coordinator.run_states.get(task.id)
+            if state is not None:
+                latest = state.latest_run or {}
+                attributes.update(
+                    {
+                        "monitoring_active": state.active,
+                        "waiting_for_start": state.waiting_for_start,
+                        "baseline_start_time": state.baseline_start,
+                        "tracked_start_time": state.tracked_start,
+                        "last_start_time": latest.get("start_time"),
+                        "last_stop_time": latest.get("stop_time"),
+                        "last_exit_type": latest.get("exit_type"),
+                        "last_exit_code": latest.get("exit_code"),
+                        "monitoring_error": state.error,
+                    }
+                )
+
+        return attributes
 
     def _get_task(self) -> Task | None:
         """Get the task data from the coordinator."""
@@ -157,6 +195,10 @@ async def async_setup_entry(
         entities: list[SynologyTaskSensor] = []
 
         for task in tasks:
+            descriptions = list(TASK_SENSORS)
+            if task.id in coordinator.run_states:
+                descriptions.append(EXECUTION_SENSOR)
+
             entities.extend(
                 SynologyTaskSensor(
                     coordinator=coordinator,
@@ -164,7 +206,7 @@ async def async_setup_entry(
                     entity_description=description,
                     config_entry=entry,
                 )
-                for description in TASK_SENSORS
+                for description in descriptions
             )
 
         return entities
