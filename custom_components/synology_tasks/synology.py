@@ -181,7 +181,22 @@ class SynologyDSM:
                 self._synotoken = None
                 self._sync_login()
                 params[API_SYNO_TOKEN] = self._synotoken
-                r = self._session.get(self._url, params=params, verify=self._verify_ssl)
+                
+                # Ace exposes authentication through auth.cgi.
+                # Task and event APIs remain on entry.cgi.
+                request_url = (
+                    self._url.rsplit("/", 1)[0] + "/auth.cgi"
+                    if is_login
+                    else self._url
+                )
+    
+                r = self._session.get(
+                    request_url,
+                    params=params,
+                    verify=self._verify_ssl,
+                    timeout=30,
+                )
+                
                 response = r.json()
                 if response.get(DATA_SUCCESS_KEY, False):
                     return response
