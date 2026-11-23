@@ -194,22 +194,6 @@ class SynologyDSM:
             task_id,
             response,
         )
-        # Temporary diagnostic: remove when monitoring is implemented.
-        if task_id in {25, 26}:
-            try:
-                latest = await self.get_latest_run(task_id)
-                _LOGGER.debug(
-                    "DSM latest run for task ID %s: %s",
-                    task_id,
-                    latest,
-                )
-            except Exception:
-                _LOGGER.warning(
-                    "Task run was requested, but reading history failed "
-                    "for task ID %s",
-                    task_id,
-                    exc_info=True,
-                )
     
     def _sync_login(self) -> None:
         """Login to the DSM."""
