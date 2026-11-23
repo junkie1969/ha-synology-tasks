@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import voluptuous as vol
+
 from homeassistant import config_entries
 from homeassistant.components.synology_dsm.const import DOMAIN as SYNOLOGY_DOMAIN
 from homeassistant.exceptions import HomeAssistantError
@@ -76,11 +78,9 @@ class SynologyTasksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id=STEP_USER,
                 data_schema=self.add_suggested_values_to_schema(
-                    config_entries.vol.Schema(
+                    vol.Schema(
                         {
-                            config_entries.vol.Required(
-                                CONFIG_DSM_ENTRY_ID
-                            ): config_entries.vol.In(dsm_entries),
+                            vol.Required(CONFIG_DSM_ENTRY_ID): vol.In(dsm_entries),
                         }
                     ),
                     user_input or {},

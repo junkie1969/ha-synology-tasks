@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -98,35 +99,60 @@ class SynologyDSM:
         tasks: list[SynologyTask] = tasks_data.get(DATA_TASKS_KEY, [])
         return [Task.from_api(task) for task in tasks]
 
-    async def run_task(self, task_name: str) -> None:
-        """Run a task by name."""
+    async def run_task(self, task_name: str | int) -> None:
+        """Run a task by ID, retaining support for callers using its name."""
+        # Buttons pass the numeric ID. Existing service callers may
+        # still pass a task name, so resolve those without breaking them.
+        if isinstance(task_name, int):
+            task_id = task_name
+        else:
+            tasks = await self.get_tasks()
+            matches = [task for task in tasks if task.name == task_name]
+
+            if len(matches) != 1:
+                raise SynologyTaskRunError(
+                    f"Expected one task named {task_name!r}; "
+                    f"found {len(matches)}"
+                )
+
+            task_id = int(matches[0].id)
+
         params = {
-            "api": API_EVENT_SCHEDULER,
-            "method": API_METHOD_EVENT_SCHEDULER,
-            "version": API_VERSION_EVENT_SCHEDULER,
-            SERVICE_DATA_TASK_NAME: task_name,
+            "api": "SYNO.Entry.Request",
+            "method": "request",
+            "version": "1",
+            "stop_when_error": "false",
+            "mode": json.dumps("sequential"),
+            "compound": json.dumps(
+                [
+                    {
+                        "api": API_TASK_SCHEDULER,
+                        "method": "run",
+                        "version": 1,
+                        "task": [task_id],
+                    }
+                ]
+            ),
         }
 
-        _LOGGER.debug(
-            "Running task via DSM API: task_name=%s, api=%s, method=%s",
-            task_name,
-            API_EVENT_SCHEDULER,
-            API_METHOD_EVENT_SCHEDULER,
-        )
+        _LOGGER.debug("Requesting DSM execution of task ID %s", task_id)
 
         try:
             response = await self.hass.async_add_executor_job(
                 self._sync_request, params
             )
-            _LOGGER.debug(
-                "DSM run_task response for '%s': success=%s",
-                task_name,
-                response.get(DATA_SUCCESS_KEY),
-            )
         except Exception as err:
-            _LOGGER.exception("Error running task '%s'", task_name)
-            raise SynologyTaskRunError from err
+            _LOGGER.exception("Error running task ID %s", task_id)
+            raise SynologyTaskRunError(
+                f"Unable to request execution of task ID {task_id}"
+            ) from err
 
+        _LOGGER.debug(
+            "DSM task-run response for task ID %s: %s",
+            task_id,
+            response,
+        )
+        
     def _sync_login(self) -> None:
         """Login to the DSM."""
         if self._session is None:
@@ -149,51 +175,78 @@ class SynologyDSM:
     def _sync_request(
         self, params: dict | None = None, *, is_login: bool = False
     ) -> SynologyResponse:
-        """Do a request to the DSM."""
-        if not is_login and (not self._sid or not self._synotoken or not self._session):
+        """Send a DSM request, retrying once after an expired session."""
+        request_params = dict(params or {})
+
+        if not is_login and (
+            not self._sid or not self._synotoken or not self._session
+        ):
             self._sync_login()
 
-        params[API_SYNO_TOKEN] = self._synotoken
+        if self._session is None:
+            self._session = requests.Session()
 
-        response: SynologyResponse | None = None
-        try:
-            r = self._session.get(self._url, params=params, verify=self._verify_ssl)
-            response = r.json()
-        except Exception as err:
-            _LOGGER.exception("Unable to get response form DSM")
-            raise SynologyDSMAPIError from err
+        # Login uses auth.cgi; task and event requests use entry.cgi.
+        request_url = (
+            self._url.rsplit("/", 1)[0] + "/auth.cgi"
+            if is_login
+            else self._url
+        )
 
-        if not response.get(DATA_SUCCESS_KEY, False):
+        # Never retry login automatically. Other requests may retry once
+        # after receiving the invalid-session error.
+        attempts = 1 if is_login else 2
+
+        for attempt in range(attempts):
+            if not is_login:
+                request_params[API_SYNO_TOKEN] = self._synotoken
+
+            try:
+                r = self._session.get(
+                    request_url,
+                    params=request_params,
+                    verify=self._verify_ssl,
+                    timeout=30,
+                )
+                response: SynologyResponse = r.json()
+            except Exception:
+                # Avoid logging the request URL: login parameters
+                # contain the DSM credentials.
+                raise SynologyDSMAPIError(
+                    "Unable to read a valid response from DSM"
+                ) from None
+
+            if response.get(DATA_SUCCESS_KEY, False):
+                return response
+
             error_code = response.get(DATA_ERROR_KEY, {}).get(
                 DATA_CODE_KEY, API_UNKNOWN
             )
-            # Session expired (e.g. after ~20 min): re-login and retry once
+
             if (
                 not is_login
+                and attempt == 0
                 and error_code == API_ERROR_CODE_INVALID_SESSION
-                and self._sid
             ):
                 _LOGGER.debug(
-                    "DSM session expired (error %s), re-logging in and retrying",
+                    "DSM session expired (error %s); logging in again",
                     error_code,
                 )
                 self._sid = None
                 self._synotoken = None
                 self._sync_login()
-                params[API_SYNO_TOKEN] = self._synotoken
-                r = self._session.get(self._url, params=params, verify=self._verify_ssl)
-                response = r.json()
-                if response.get(DATA_SUCCESS_KEY, False):
-                    return response
-                error_code = response.get(DATA_ERROR_KEY, {}).get(
-                    DATA_CODE_KEY, API_UNKNOWN
-                )
-            _LOGGER.error("Error requesting: %s", r.text)
-            error_message = f"Received error code: {error_code}"
+                continue
+
+            error_message = (
+                f"DSM API {request_params.get('api')} "
+                f"method {request_params.get('method')} "
+                f"version {request_params.get('version')} "
+                f"at {request_url} returned error code: {error_code}"
+            )
+            _LOGGER.error("%s", error_message)
             raise SynologyDSMAPIError(error_message)
 
-        return response
-
+        raise SynologyDSMAPIError("DSM request failed after retry")
 
 class SynologyTaskRunError(HomeAssistantError):
     """Error to indicate the task run failed."""
